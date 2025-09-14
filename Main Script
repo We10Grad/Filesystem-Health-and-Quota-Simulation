@@ -1,0 +1,68 @@
+#!/bin/bash
+# Filesystem Health & Quota Simulation
+# Clean up any previous runs
+sudo umount /tmp/testmount 2>/dev/null
+sudo losetup -d /dev/loop2 2>/dev/null
+rm -f /home/ubuntu/disk1
+
+# Create fresh filesystem
+fallocate -l 50M /home/ubuntu/disk1
+sudo mkfs.ext4 -N 500 /home/ubuntu/disk1
+
+# Set up loop device (find available one)
+LOOP_DEV=$(sudo losetup --show -f /home/ubuntu/disk1)
+echo "Using loop device: $LOOP_DEV"
+
+# Mount with quota support
+mkdir -p /tmp/testmount
+sudo mount -o usrquota $LOOP_DEV /tmp/testmount
+
+echo "Testing inode exhaustion..."
+sudo mkdir /tmp/testmount/files
+cd /tmp/testmount/files
+
+for i in {1..600}; do
+    echo "test" | sudo tee file$i.txt > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Inodes exhausted at file $i"
+        break
+    fi
+done
+
+df -i /tmp/testmount
+
+echo "Cleaning up test files for quota test..."
+sudo rm -rf /tmp/testmount/files
+df -i /tmp/testmount
+
+echo "Setting up quotas..."
+cd /
+sudo umount /tmp/testmount
+sudo mount -o usrquota $LOOP_DEV /tmp/testmount
+
+sudo useradd testuser 2>/dev/null
+
+sudo quotaon /tmp/testmount
+
+sudo setquota -u testuser 1024 2048 5 10 /tmp/testmount
+
+echo "Testing quota limits..."
+sudo mkdir /tmp/testmount/usertest
+sudo chown testuser:testuser /tmp/testmount/usertest
+
+sudo -u testuser bash -c '
+cd /tmp/testmount/usertest
+for i in {1..10}; do
+    dd if=/dev/zero of=big$i bs=1024 count=200 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "Quota exceeded at file $i"
+        break
+    fi
+done
+'
+
+sudo repquota /tmp/testmount
+
+#Cleanup
+sudo umount /tmp/testmount
+sudo losetup -d $LOOP_DEV
